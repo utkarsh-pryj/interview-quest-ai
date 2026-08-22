@@ -6,42 +6,36 @@ from sqlalchemy.orm import sessionmaker, Session
 from app.core.config import settings
 from app.core.logging import logger
 
-def get_database_urls():
+def get_normalized_database_urls():
     """
-    Determines active async and sync database connection URLs.
-    Supports PostgreSQL (local PGAdmin / Supabase) with automatic SQLite local development fallback.
+    Normalizes database connection strings for both Async (FastAPI) and Sync (CLI/Ingestion) engines.
+    Automatically handles 'postgres://', 'postgresql://', and 'postgresql+asyncpg://' formats seamlessly.
     """
-    db_url = settings.DATABASE_URL
-    sync_url = settings.SYNC_DATABASE_URL
-    
-    # Check if postgres credentials might need fallback during initial setup
-    if "postgresql" in db_url:
-        try:
-            import psycopg2
-            # Quick check if connection works with current settings
-            # If not configured yet, use local SQLite so the app runs out-of-the-box
-            import urllib.parse
-            parsed = urllib.parse.urlparse(sync_url)
-            conn = psycopg2.connect(
-                dbname=parsed.path.lstrip('/') or 'postgres',
-                user=parsed.username or 'postgres',
-                password=parsed.password or 'postgres',
-                host=parsed.hostname or 'localhost',
-                port=parsed.port or 5432,
-                connect_timeout=2
-            )
-            conn.close()
-            logger.info("Connected to PostgreSQL database successfully.")
-            return db_url, sync_url
-        except Exception as e:
-            logger.info(f"PostgreSQL connection requires PGAdmin credentials ({e}). Using local sqlite database for seamless operation.")
-            sqlite_async = "sqlite+aiosqlite:///./interviewquest.db"
-            sqlite_sync = "sqlite:///./interviewquest.db"
-            return sqlite_async, sqlite_sync
-            
-    return db_url, sync_url
+    raw_async = os.getenv("DATABASE_URL", settings.DATABASE_URL)
+    raw_sync = os.getenv("SYNC_DATABASE_URL", settings.SYNC_DATABASE_URL or raw_async)
 
-active_async_url, active_sync_url = get_database_urls()
+    # Base URL to normalize
+    base_url = raw_async or raw_sync
+
+    # Normalize Async URL (MUST use postgresql+asyncpg:// for async engine)
+    if base_url.startswith("postgres://"):
+        async_url = base_url.replace("postgres://", "postgresql+asyncpg://", 1)
+    elif base_url.startswith("postgresql://"):
+        async_url = base_url.replace("postgresql://", "postgresql+asyncpg://", 1)
+    else:
+        async_url = base_url
+
+    # Normalize Sync URL (MUST use postgresql:// for sync engine)
+    if raw_sync.startswith("postgres://"):
+        sync_url = raw_sync.replace("postgres://", "postgresql://", 1)
+    elif raw_sync.startswith("postgresql+asyncpg://"):
+        sync_url = raw_sync.replace("postgresql+asyncpg://", "postgresql://", 1)
+    else:
+        sync_url = raw_sync or async_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+    return async_url, sync_url
+
+active_async_url, active_sync_url = get_normalized_database_urls()
 
 # Async Engine (for FastAPI request handlers)
 async_engine = create_async_engine(
