@@ -2,6 +2,7 @@ from typing import AsyncGenerator
 import os
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy import create_engine
+from sqlalchemy.pool import NullPool
 from sqlalchemy.orm import sessionmaker, Session
 from app.core.config import settings
 from app.core.logging import logger
@@ -37,11 +38,26 @@ def get_normalized_database_urls():
 
 active_async_url, active_sync_url = get_normalized_database_urls()
 
+# Supabase / PgBouncer compatibility flags
+is_pgbouncer = (
+    "pooler.supabase.com" in active_async_url or 
+    ":6543" in active_async_url or 
+    "supabase" in active_async_url.lower()
+)
+
+async_connect_args = {}
+if "asyncpg" in active_async_url:
+    # Disable prepared statement caching for Supabase PgBouncer transaction pooling
+    async_connect_args["statement_cache_size"] = 0
+    async_connect_args["prepared_statement_cache_size"] = 0
+
 # Async Engine (for FastAPI request handlers)
 async_engine = create_async_engine(
     active_async_url,
     echo=False,
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    poolclass=NullPool if is_pgbouncer else None,
+    connect_args=async_connect_args
 )
 
 AsyncSessionLocal = async_sessionmaker(
@@ -56,7 +72,8 @@ AsyncSessionLocal = async_sessionmaker(
 sync_engine = create_engine(
     active_sync_url,
     echo=False,
-    pool_pre_ping=True
+    pool_pre_ping=True,
+    poolclass=NullPool if is_pgbouncer else None
 )
 
 SyncSessionLocal = sessionmaker(

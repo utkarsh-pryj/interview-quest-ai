@@ -17,18 +17,32 @@ from app.api.analysis import router as analysis_router
 from app.api.interviews import router as interviews_router
 from app.api.health import router as health_router
 from app.db.base import Base
-from app.db.session import async_engine
+from app.db.session import async_engine, sync_engine
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
     logger.info("Initializing InterviewQuest AI database tables...")
     try:
-        async with async_engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        logger.info("Database tables initialized successfully.")
+        # Create all tables on startup (sync engine is rock solid with PgBouncer)
+        Base.metadata.create_all(bind=sync_engine)
+        logger.info("Database tables initialized successfully in PostgreSQL.")
     except Exception as e:
-        logger.warning(f"Database initialization note: {e}")
+        logger.warning(f"Database table sync initialization: {e}")
+        try:
+            async with async_engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            logger.info("Database tables initialized via async engine.")
+        except Exception as async_e:
+            logger.error(f"Database initialization error: {async_e}")
+
+    # Seed baseline O*NET skills and questions if empty
+    try:
+        from app.ingestion.load_datasets import run_ingestion_pipeline
+        run_ingestion_pipeline()
+    except Exception as ing_e:
+        logger.info(f"Ingestion check: {ing_e}")
+
     yield
     logger.info("Shutting down InterviewQuest AI application...")
 
