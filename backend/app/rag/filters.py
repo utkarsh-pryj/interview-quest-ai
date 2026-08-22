@@ -1,60 +1,61 @@
 """
-Diversity, Deduplication & Budget Constraint Filters for RAG Candidate Sets.
-Conforms to Blueprint Section 12 (points 22-24).
+Diversity, Deduplication & Near-Duplicate Suppression Filters for RAG Candidates.
+Implements MMR (Maximum Marginal Relevance) and semantic diversity selection.
+Conforms to RAG Diversity specifications.
 """
 
-from typing import List, Set, Dict, Any
+from typing import List, Set, Dict, Any, Optional
 from app.rag.ranker import QuestionCandidate
 from app.rag.embeddings import EmbeddingService
-from app.ingestion.deduplicate import jaccard_similarity, get_word_shingles
+from app.core.config import settings
 
 class RAGFilters:
-    """Filters and diversifies retrieved questions."""
+    """Filters and diversifies retrieved questions to eliminate near-duplicate prompts."""
 
     @classmethod
     def filter_and_diversify(
         cls,
         candidates: List[QuestionCandidate],
         target_count: int,
-        similarity_ceiling: float = 0.78
+        similarity_ceiling: Optional[float] = None
     ) -> List[QuestionCandidate]:
         """
-        Greedy maximum-marginal-relevance (MMR) style diversity filter.
-        Ensures questions in the final set are diverse in topic and text.
+        Greedy Maximum Marginal Relevance (MMR) style diversity filter.
+        Eliminates questions that are semantically identical (similarity > ceiling).
         """
         if not candidates:
             return []
 
-        # Sort candidate pool descending by final_score
+        ceiling = similarity_ceiling or settings.DIVERSITY_SIMILARITY_CEILING
+
+        # Sort candidate pool descending by multi-signal final_score
         sorted_candidates = sorted(candidates, key=lambda c: c.final_score, reverse=True)
 
         selected: List[QuestionCandidate] = []
-        selected_shingles: List[Set[str]] = []
+        selected_vectors: List[List[float]] = []
 
         for cand in sorted_candidates:
             if len(selected) >= target_count:
                 break
 
-            cand_shingles = get_word_shingles(cand.question_text)
-            
-            # Check overlap against already selected questions
+            # Calculate candidate vector if missing
+            cand_vec = cand.vector_embedding
+            if not cand_vec:
+                cand_vec = EmbeddingService.embed_text(cand.question_text)
+                cand.vector_embedding = cand_vec
+
+            # Check semantic vector overlap against already selected questions
             is_redundant = False
-            for prev_cand, prev_shingles in zip(selected, selected_shingles):
-                # Text shingle overlap check
-                j_sim = jaccard_similarity(cand_shingles, prev_shingles)
-                if j_sim > similarity_ceiling:
-                    is_redundant = True
-                    break
-                
-                # Semantic vector overlap check if embeddings available
-                if cand.vector_embedding and prev_cand.vector_embedding:
-                    v_sim = EmbeddingService.cosine_similarity(cand.vector_embedding, prev_cand.vector_embedding)
-                    if v_sim > 0.90:
+            for prev_cand, prev_vec in zip(selected, selected_vectors):
+                if cand_vec and prev_vec:
+                    sim = EmbeddingService.cosine_similarity(cand_vec, prev_vec)
+                    if sim > ceiling:
                         is_redundant = True
+                        cand.duplicate_penalty = 0.25 # Track duplicate penalty
                         break
 
             if not is_redundant:
                 selected.append(cand)
-                selected_shingles.append(cand_shingles)
+                selected_vectors.append(cand_vec)
 
         return selected

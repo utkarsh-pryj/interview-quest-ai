@@ -1,11 +1,12 @@
 """
 Multi-Signal Question Ranking Engine.
 Computes weighted composite relevance scores using semantic vectors, JD context, resume context, and strategy fit.
-Conforms to Blueprint Section 12 (points 21 & 26).
+Conforms to RAG Multi-Signal Ranking specifications.
 """
 
 from typing import Dict, Any, List, Optional
 from app.rag.embeddings import EmbeddingService
+from app.core.config import settings
 
 class QuestionCandidate:
     def __init__(
@@ -40,18 +41,26 @@ class QuestionCandidate:
         self.resume_relevance: float = 0.0
         self.role_category_match: float = 0.0
         self.difficulty_strategy_fit: float = 0.0
+        self.duplicate_penalty: float = 0.0
         self.final_score: float = 0.0
         self.selection_rationale: str = ""
 
-class QuestionRanker:
-    """Ranks question candidates using the weighted multi-signal blueprint formula."""
+    def get_score_breakdown(self) -> Dict[str, Any]:
+        """Return explainable internal score breakdown."""
+        return {
+            "question_id": self.question_id,
+            "final_score": round(self.final_score, 3),
+            "semantic_skill_relevance": round(self.semantic_skill_relevance, 3),
+            "jd_relevance": round(self.jd_relevance, 3),
+            "resume_relevance": round(self.resume_relevance, 3),
+            "role_category_match": round(self.role_category_match, 3),
+            "difficulty_strategy_fit": round(self.difficulty_strategy_fit, 3),
+            "duplicate_penalty": round(self.duplicate_penalty, 3),
+            "selection_rationale": self.selection_rationale
+        }
 
-    # Blueprint Section 12 formula weights:
-    WEIGHT_SKILL = 0.40
-    WEIGHT_JD = 0.25
-    WEIGHT_RESUME = 0.15
-    WEIGHT_ROLE = 0.10
-    WEIGHT_STRATEGY = 0.10
+class QuestionRanker:
+    """Ranks question candidates using configurable multi-signal formula."""
 
     @classmethod
     def score_candidate(
@@ -62,53 +71,61 @@ class QuestionRanker:
         resume_vec: Optional[List[float]],
         target_role_family: str,
         target_category: str,
-        target_difficulty: str,
+        target_difficulty: str = "INTERMEDIATE",
         is_missing_skill: bool = False
     ) -> float:
         """
-        Calculates the combined score for a question candidate:
-        final_score = 0.40 * skill + 0.25 * jd + 0.15 * resume + 0.10 * role_category + 0.10 * difficulty_strategy
+        Calculates configurable weighted multi-signal score:
+        final_score = w_skill * skill + w_jd * jd + w_res * resume + w_role * role + w_strat * strategy - penalty
         """
         q_vec = candidate.vector_embedding
 
-        # 1. Semantic Skill Relevance (0.40)
+        # 1. Semantic Skill Relevance
         if q_vec and target_skill_vec:
             candidate.semantic_skill_relevance = EmbeddingService.cosine_similarity(q_vec, target_skill_vec)
         else:
             candidate.semantic_skill_relevance = 0.60
 
-        # 2. JD Relevance (0.25)
+        # 2. JD Relevance
         if q_vec and jd_vec:
             candidate.jd_relevance = EmbeddingService.cosine_similarity(q_vec, jd_vec)
         else:
             candidate.jd_relevance = 0.50
 
-        # 3. Resume Relevance (0.15)
+        # 3. Resume Relevance
         if q_vec and resume_vec:
             candidate.resume_relevance = EmbeddingService.cosine_similarity(q_vec, resume_vec)
         else:
             candidate.resume_relevance = 0.50
 
-        # 4. Role / Category Match (0.10)
-        cat_match = 1.0 if candidate.category == target_category else 0.4
-        role_match = 1.0 if (candidate.role and target_role_family.lower() in candidate.role.lower()) else 0.6
+        # 4. Role / Category Match
+        cat_match = 1.0 if candidate.category == target_category else 0.45
+        role_match = 1.0 if (candidate.role and target_role_family.lower() in candidate.role.lower()) else 0.60
         candidate.role_category_match = (cat_match * 0.6) + (role_match * 0.4)
 
-        # 5. Difficulty / Strategy Fit (0.10)
-        diff_score = 1.0 if candidate.difficulty == target_difficulty else 0.7
-        missing_boost = 0.3 if is_missing_skill else 0.0
+        # 5. Difficulty / Strategy Fit (Gives targeted boost to missing required skills)
+        diff_score = 1.0 if candidate.difficulty == target_difficulty else 0.70
+        missing_boost = 0.30 if is_missing_skill else 0.0
         candidate.difficulty_strategy_fit = min(1.0, diff_score + missing_boost)
 
-        # Calculate Final Weighted Composite Score
-        candidate.final_score = (
-            cls.WEIGHT_SKILL * candidate.semantic_skill_relevance +
-            cls.WEIGHT_JD * candidate.jd_relevance +
-            cls.WEIGHT_RESUME * candidate.resume_relevance +
-            cls.WEIGHT_ROLE * candidate.role_category_match +
-            cls.WEIGHT_STRATEGY * candidate.difficulty_strategy_fit
-        )
+        # Read weights dynamically from configuration
+        w_skill = settings.RANKING_WEIGHT_SKILL
+        w_jd = settings.RANKING_WEIGHT_JD
+        w_resume = settings.RANKING_WEIGHT_RESUME
+        w_role = settings.RANKING_WEIGHT_ROLE
+        w_strategy = settings.RANKING_WEIGHT_STRATEGY
 
-        # Construct Explainable Selection Rationale (Blueprint Section 12.26)
+        # Calculate Final Weighted Composite Score
+        candidate.final_score = max(0.0, (
+            w_skill * candidate.semantic_skill_relevance +
+            w_jd * candidate.jd_relevance +
+            w_resume * candidate.resume_relevance +
+            w_role * candidate.role_category_match +
+            w_strategy * candidate.difficulty_strategy_fit -
+            candidate.duplicate_penalty
+        ))
+
+        # Construct Explainable Selection Rationale
         reasons = []
         if is_missing_skill:
             reasons.append(f"Probes identified JD skill gap ({candidate.skill_name or candidate.topic})")

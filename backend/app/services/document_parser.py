@@ -1,44 +1,131 @@
 """
-Deterministic Document Parser.
-Extracts normalized text and preserves section boundaries from PDF and DOCX files without AI dependency.
-Conforms to Blueprint Section 10.
+Document-Aware Sectional Parser and Profiler.
+Extracts structured document sections and creates document-aware chunks with section metadata.
+Preserves logical boundaries:
+- Resume: Summary, Skills, Experience, Projects, Education, Certifications
+- Job Description: Role Title, Responsibilities, Required Skills, Preferred Skills, Qualifications
+Conforms to RAG Document Processing specifications.
 """
 
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, List, Tuple
 from app.core.logging import logger
 
-SECTION_HEADERS = {
+RESUME_SECTION_HEADERS = {
     "summary": [
         r"summary", r"professional summary", r"executive summary",
-        r"about me", r"profile", r"career objective", r"objective"
-    ],
-    "experience": [
-        r"experience", r"work experience", r"employment history",
-        r"professional experience", r"work history", r"career history"
-    ],
-    "projects": [
-        r"projects", r"personal projects", r"key projects",
-        r"technical projects", r"portfolio", r"open source"
+        r"about me", r"profile", r"career objective", r"objective", r"overview"
     ],
     "skills": [
         r"skills", r"technical skills", r"core competencies",
         r"skills & tools", r"technologies", r"tools & technologies",
-        r"proficiencies", r"programming skills"
+        r"proficiencies", r"programming skills", r"technical proficiencies"
+    ],
+    "experience": [
+        r"experience", r"work experience", r"employment history",
+        r"professional experience", r"work history", r"career history",
+        r"relevant experience"
+    ],
+    "projects": [
+        r"projects", r"personal projects", r"key projects",
+        r"technical projects", r"portfolio", r"open source", r"academic projects"
     ],
     "education": [
         r"education", r"academic background", r"qualifications",
-        r"degrees", r"certifications", r"courses"
+        r"degrees", r"academic history"
     ],
-    "responsibilities": [
-        r"responsibilities", r"key responsibilities", r"duties",
-        r"requirements", r"job requirements", r"what you'll do"
+    "certifications": [
+        r"certifications", r"licenses", r"courses", r"credentials",
+        r"certificates", r"awards"
     ]
 }
 
+JD_SECTION_HEADERS = {
+    "role_title": [
+        r"role", r"position", r"job title", r"about the role", r"overview"
+    ],
+    "responsibilities": [
+        r"responsibilities", r"key responsibilities", r"duties",
+        r"what you'll do", r"role responsibilities", r"core duties", r"what you will do"
+    ],
+    "required_skills": [
+        r"requirements", r"required skills", r"minimum qualifications",
+        r"basic qualifications", r"must have", r"what you need", r"technical requirements",
+        r"required experience"
+    ],
+    "preferred_skills": [
+        r"preferred skills", r"preferred qualifications", r"bonus points",
+        r"nice to have", r"good to have", r"desired skills", r"additional qualifications"
+    ],
+    "qualifications": [
+        r"qualifications", r"education requirements", r"background"
+    ]
+}
+
+@dataclass
+class DocumentChunk:
+    """Document chunk preserving document structure and section metadata."""
+    document_id: str
+    document_type: str # "RESUME" | "JOB_DESCRIPTION"
+    section_name: str
+    chunk_index: int
+    text: str
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+@dataclass
+class CandidateProfile:
+    """Structured candidate profile extracted from resume."""
+    raw_text: str
+    summary: str = ""
+    skills_text: str = ""
+    experience_text: str = ""
+    projects_text: str = ""
+    education_text: str = ""
+    certifications_text: str = ""
+    contact_info: Dict[str, Any] = field(default_factory=dict)
+    chunks: List[DocumentChunk] = field(default_factory=list)
+
+    def get_compact_retrieval_context(self) -> str:
+        """Constructs a compact, signal-dense context string for retrieval embedding."""
+        parts = []
+        if self.skills_text:
+            parts.append(f"Skills: {self.skills_text[:400]}")
+        if self.projects_text:
+            parts.append(f"Projects: {self.projects_text[:300]}")
+        if self.experience_text:
+            parts.append(f"Experience: {self.experience_text[:400]}")
+        if self.summary:
+            parts.append(f"Summary: {self.summary[:200]}")
+        return " | ".join(parts) if parts else self.raw_text[:800]
+
+@dataclass
+class JobRequirementProfile:
+    """Structured job requirements extracted from job description."""
+    raw_text: str
+    role_title: str = ""
+    responsibilities_text: str = ""
+    required_skills_text: str = ""
+    preferred_skills_text: str = ""
+    qualifications_text: str = ""
+    chunks: List[DocumentChunk] = field(default_factory=list)
+
+    def get_compact_retrieval_context(self) -> str:
+        """Constructs a compact, requirement-dense context string for retrieval embedding."""
+        parts = []
+        if self.role_title:
+            parts.append(f"Target Role: {self.role_title}")
+        if self.required_skills_text:
+            parts.append(f"Required: {self.required_skills_text[:500]}")
+        if self.preferred_skills_text:
+            parts.append(f"Preferred: {self.preferred_skills_text[:300]}")
+        if self.responsibilities_text:
+            parts.append(f"Responsibilities: {self.responsibilities_text[:400]}")
+        return " | ".join(parts) if parts else self.raw_text[:800]
+
 class DocumentParser:
-    """Deterministic parser for PDF, DOCX, and TXT documents."""
+    """Document-aware parser for PDF, DOCX, and TXT documents."""
 
     @classmethod
     def extract_text_from_pdf(cls, file_path: Path) -> str:
@@ -81,75 +168,36 @@ class DocumentParser:
             raise ValueError(f"Could not extract text from DOCX: {e}")
 
     @classmethod
-    def parse_document(cls, file_path: Path) -> Dict[str, Any]:
-        """Main entry point to parse a document and extract sections and metadata."""
-        suffix = file_path.suffix.lower()
-        if suffix == ".pdf":
-            raw_text = cls.extract_text_from_pdf(file_path)
-        elif suffix in [".docx", ".doc"]:
-            raw_text = cls.extract_text_from_docx(file_path)
-        elif suffix in [".txt", ".md"]:
-            raw_text = file_path.read_text(encoding="utf-8", errors="ignore")
-        else:
-            raise ValueError(f"Unsupported file format: {suffix}")
-
-        normalized_text = cls.normalize_document_text(raw_text)
-        sections = cls.extract_sections(normalized_text)
-        contact_info = cls.extract_contact_info(normalized_text)
-
-        return {
-            "filename": file_path.name,
-            "raw_text": raw_text,
-            "extracted_text": normalized_text,
-            "sections": sections,
-            "contact_info": contact_info
-        }
-
-    @classmethod
     def normalize_document_text(cls, text: str) -> str:
         """Clean text, remove weird characters, and preserve paragraph structure."""
         if not text:
             return ""
-        # Normalize non-breaking spaces and tabs
         cleaned = text.replace("\u00a0", " ").replace("\t", " ")
-        # Clean carriage returns
         cleaned = cleaned.replace("\r\n", "\n").replace("\r", "\n")
-        # Collapse multiple spaces
         cleaned = re.sub(r"[ ]{2,}", " ", cleaned)
-        # Collapse 3+ newlines to 2
         cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
         return cleaned.strip()
 
     @classmethod
-    def extract_sections(cls, text: str) -> Dict[str, str]:
-        """Detect and segment standard resume/JD sections."""
+    def segment_sections(cls, text: str, header_patterns_map: Dict[str, List[str]]) -> Dict[str, str]:
+        """Generic sectional segmentation using header regexes."""
         lines = text.split("\n")
-        sections: Dict[str, List[str]] = {
-            "summary": [],
-            "experience": [],
-            "projects": [],
-            "skills": [],
-            "education": [],
-            "responsibilities": [],
-            "other": []
-        }
-
+        sections: Dict[str, List[str]] = {k: [] for k in header_patterns_map.keys()}
+        sections["other"] = []
         current_section = "other"
 
-        # Regex to detect heading lines
         for line in lines:
             trimmed = line.strip()
             if not trimmed:
                 continue
 
-            # Check if line looks like a header (short line, upper case, or ending with colon)
             detected_header = None
-            if len(trimmed) < 40:
-                clean_header = re.sub(r"[:\-_|#]", "", trimmed).strip().lower()
-                for section_name, patterns in SECTION_HEADERS.items():
+            if len(trimmed) < 45:
+                clean_header = re.sub(r"[:\-_|#*]", "", trimmed).strip().lower()
+                for sec_name, patterns in header_patterns_map.items():
                     for pat in patterns:
                         if re.fullmatch(pat, clean_header, re.IGNORECASE):
-                            detected_header = section_name
+                            detected_header = sec_name
                             break
                     if detected_header:
                         break
@@ -159,14 +207,113 @@ class DocumentParser:
             else:
                 sections[current_section].append(trimmed)
 
-        # Merge section lines into text blocks
         result = {}
         for sec, lines_list in sections.items():
             content = "\n".join(lines_list).strip()
             if content:
                 result[sec] = content
-
         return result
+
+    @classmethod
+    def create_chunks_from_sections(
+        cls,
+        document_id: str,
+        document_type: str,
+        sections: Dict[str, str],
+        max_chunk_chars: int = 800
+    ) -> List[DocumentChunk]:
+        """
+        Creates document-aware chunks preserved by section.
+        Splits only large sections that exceed max_chunk_chars with small overlap.
+        """
+        chunks: List[DocumentChunk] = []
+        chunk_idx = 0
+
+        for sec_name, sec_text in sections.items():
+            if not sec_text:
+                continue
+
+            if len(sec_text) <= max_chunk_chars:
+                chunks.append(DocumentChunk(
+                    document_id=document_id,
+                    document_type=document_type,
+                    section_name=sec_name,
+                    chunk_index=chunk_idx,
+                    text=sec_text,
+                    metadata={"char_count": len(sec_text)}
+                ))
+                chunk_idx += 1
+            else:
+                # Split large section into paragraphs or smaller chunks with 100 char overlap
+                paragraphs = [p.strip() for p in sec_text.split("\n\n") if p.strip()]
+                current_buf = ""
+                for p in paragraphs:
+                    if len(current_buf) + len(p) <= max_chunk_chars:
+                        current_buf = f"{current_buf}\n\n{p}".strip() if current_buf else p
+                    else:
+                        if current_buf:
+                            chunks.append(DocumentChunk(
+                                document_id=document_id,
+                                document_type=document_type,
+                                section_name=sec_name,
+                                chunk_index=chunk_idx,
+                                text=current_buf,
+                                metadata={"char_count": len(current_buf), "subsplit": True}
+                            ))
+                            chunk_idx += 1
+                        current_buf = p
+
+                if current_buf:
+                    chunks.append(DocumentChunk(
+                        document_id=document_id,
+                        document_type=document_type,
+                        section_name=sec_name,
+                        chunk_index=chunk_idx,
+                        text=current_buf,
+                        metadata={"char_count": len(current_buf), "subsplit": True}
+                    ))
+                    chunk_idx += 1
+
+        return chunks
+
+    @classmethod
+    def build_candidate_profile(cls, raw_text: str, document_id: str = "temp") -> CandidateProfile:
+        """Parse raw resume text into structured CandidateProfile and document chunks."""
+        normalized = cls.normalize_document_text(raw_text)
+        sections = cls.segment_sections(normalized, RESUME_SECTION_HEADERS)
+        contact = cls.extract_contact_info(normalized)
+        chunks = cls.create_chunks_from_sections(document_id, "RESUME", sections)
+
+        return CandidateProfile(
+            raw_text=normalized,
+            summary=sections.get("summary", ""),
+            skills_text=sections.get("skills", ""),
+            experience_text=sections.get("experience", ""),
+            projects_text=sections.get("projects", ""),
+            education_text=sections.get("education", ""),
+            certifications_text=sections.get("certifications", ""),
+            contact_info=contact,
+            chunks=chunks
+        )
+
+    @classmethod
+    def build_job_requirement_profile(cls, raw_text: str, title: str = "", company: str = "", document_id: str = "temp") -> JobRequirementProfile:
+        """Parse raw JD text into structured JobRequirementProfile and document chunks."""
+        normalized = cls.normalize_document_text(raw_text)
+        sections = cls.segment_sections(normalized, JD_SECTION_HEADERS)
+        chunks = cls.create_chunks_from_sections(document_id, "JOB_DESCRIPTION", sections)
+
+        role_title = title or sections.get("role_title", "").split("\n")[0]
+
+        return JobRequirementProfile(
+            raw_text=normalized,
+            role_title=role_title,
+            responsibilities_text=sections.get("responsibilities", ""),
+            required_skills_text=sections.get("required_skills", ""),
+            preferred_skills_text=sections.get("preferred_skills", ""),
+            qualifications_text=sections.get("qualifications", ""),
+            chunks=chunks
+        )
 
     @classmethod
     def extract_contact_info(cls, text: str) -> Dict[str, Any]:

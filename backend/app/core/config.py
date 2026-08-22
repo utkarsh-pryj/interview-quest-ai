@@ -24,6 +24,19 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "all-MiniLM-L6-v2"
     EMBEDDING_DIMENSION: int = 384
     
+    # RAG Ranking & Retrieval Weights (Configurable for evaluation tuning)
+    RANKING_WEIGHT_SKILL: float = 0.40
+    RANKING_WEIGHT_JD: float = 0.25
+    RANKING_WEIGHT_RESUME: float = 0.15
+    RANKING_WEIGHT_ROLE: float = 0.10
+    RANKING_WEIGHT_STRATEGY: float = 0.10
+    
+    # Retrieval Confidence Thresholds
+    CONFIDENCE_HIGH_THRESHOLD: float = 0.78
+    CONFIDENCE_MEDIUM_THRESHOLD: float = 0.65
+    RETRIEVAL_TOP_K: int = 40
+    DIVERSITY_SIMILARITY_CEILING: float = 0.80
+    
     # LLM (Google Gemini)
     GEMINI_API_KEY: str = ""
     GEMINI_MODEL: str = "gemini-1.5-flash"
@@ -31,8 +44,7 @@ class Settings(BaseSettings):
     GEMINI_MAX_TOKENS_PER_CALL: int = 1024
     
     # Web Fallback
-    WEB_SEARCH_ENABLED: bool = True
-    TAVILY_API_KEY: str = ""
+    WEB_SEARCH_ENABLED: bool = False
     
     # CORS
     CORS_ORIGINS: List[str] = [

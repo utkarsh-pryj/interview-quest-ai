@@ -1,8 +1,8 @@
 """
 Two-Stage Cost-Controlled Answer Evaluator.
-Stage 1: Local semantic similarity + required concept coverage (free).
-Stage 2: Selective Gemini LLM escalation for borderline/complex answers.
-Conforms to Blueprint Section 14.
+Stage 1: Local semantic similarity + required concept coverage (zero LLM cost).
+Stage 2: Selective Gemini LLM escalation for borderline/nuanced behavioral answers.
+Conforms to RAG Evaluation specifications.
 """
 
 import re
@@ -57,9 +57,9 @@ class EvaluationService:
         expected_keywords: List[str]
     ) -> EvaluationResult:
         """
-        Executes Two-Stage evaluation pipeline:
-        Stage 1: Low cost local semantic & keyword coverage evaluation.
-        Stage 2: If score is borderline (45-75%) and Gemini is available, escalate to Gemini.
+        Two-Stage evaluation pipeline:
+        Stage 1: Low-cost local semantic & keyword coverage evaluation (Free).
+        Stage 2: If score is borderline (40-78%) or behavioral where nuance matters, escalate to Gemini.
         """
         # Step 1: Stage 1 Low-Cost Local Evaluator
         stage1_result = cls._stage1_local_evaluate(
@@ -70,11 +70,7 @@ class EvaluationService:
             expected_keywords=expected_keywords
         )
 
-        # Step 2: Determine if Gemini escalation is necessary (Blueprint Section 14)
-        # Escalate if:
-        # 1. Answer is borderline (score between 40 and 78)
-        # 2. Or behavioral answer where nuance matters
-        # 3. And Gemini client is configured
+        # Step 2: Determine if Gemini escalation is warranted
         is_borderline = 40.0 <= stage1_result.score <= 78.0
         is_behavioral = category in ["BEHAVIORAL", "SITUATIONAL", "HR"]
         should_escalate = (is_borderline or is_behavioral) and gemini_client.is_available()
@@ -114,6 +110,18 @@ class EvaluationService:
         ans_clean = candidate_answer.strip()
         ans_lower = ans_clean.lower()
 
+        if not ans_clean:
+            return EvaluationResult(
+                score=0.0,
+                concept_coverage=0.0,
+                semantic_score=0.0,
+                feedback="No answer was provided.",
+                strengths="N/A",
+                areas_for_improvement="Provide a structured response addressing the core question.",
+                evaluator_type="LOCAL_DETERMINISTIC",
+                rubric_scores={"relevance": 0, "technical_accuracy": 0, "concept_coverage": 0, "clarity": 0, "depth": 0}
+            )
+
         # 1. Semantic Similarity
         ans_vec = EmbeddingService.embed_text(ans_clean)
         ideal_text = ideal_answer if ideal_answer else question_text
@@ -123,7 +131,6 @@ class EvaluationService:
         # 2. Concept Coverage
         covered_count = 0
         all_keywords = list(expected_keywords)
-        # If no explicit keywords, extract key nouns/terms from ideal answer
         if not all_keywords and ideal_answer:
             words = [w.strip(".,;:()[]\"'") for w in ideal_answer.split() if len(w) > 4]
             all_keywords = words[:8]
@@ -137,7 +144,7 @@ class EvaluationService:
         # 3. Behavioral Structure analysis (if behavioral question)
         behavioral_bonus = 0.0
         if category in ["BEHAVIORAL", "SITUATIONAL"]:
-            star_signals = ["situation", "task", "action", "result", "when i", "my role", "we achieved", "outcome"]
+            star_signals = ["situation", "task", "action", "result", "when i", "my role", "we achieved", "outcome", "impact"]
             found_signals = sum(1 for s in star_signals if s in ans_lower)
             behavioral_bonus = min(0.20, found_signals * 0.05)
 
@@ -148,16 +155,24 @@ class EvaluationService:
         # Feedback generation
         if final_score >= 80:
             feedback = "Strong and articulate answer demonstrating thorough conceptual grasp."
-            strengths = "Clear explanation of core principles with relevant terminology."
-            improvement = "Could add real-world edge cases or concrete performance metrics."
+            strengths = "Clear explanation of core principles with accurate domain terminology."
+            improvement = "Could mention real-world trade-offs or performance optimization metrics."
         elif final_score >= 55:
-            feedback = "Good foundation, but lacks key technical depth or specific examples."
+            feedback = "Solid foundation, but lacks key technical depth or specific implementation details."
             strengths = "Demonstrates general awareness of the primary topic."
-            improvement = "Elaborate more on practical implementation details and key mechanisms."
+            improvement = "Elaborate more on practical mechanisms, architecture, and step-by-step workflow."
         else:
-            feedback = "Answer is too brief or misses critical concepts related to the question."
-            strengths = "Touched upon initial context."
-            improvement = "Review the fundamental concepts, trade-offs, and step-by-step workflow."
+            feedback = "Answer is brief or misses critical concepts related to the question."
+            strengths = "Initial context noted."
+            improvement = "Review core fundamentals, architecture decisions, and edge-case handling."
+
+        rubric = {
+            "relevance": round(semantic_sim * 10, 1),
+            "technical_accuracy": round(coverage_ratio * 10, 1),
+            "concept_coverage": round(coverage_ratio * 10, 1),
+            "clarity": 8.0 if len(ans_clean.split()) > 20 else 5.0,
+            "depth": round(semantic_sim * 10, 1)
+        }
 
         return EvaluationResult(
             score=final_score,
@@ -166,7 +181,8 @@ class EvaluationService:
             feedback=feedback,
             strengths=strengths,
             areas_for_improvement=improvement,
-            evaluator_type="LOCAL_SEMANTIC"
+            evaluator_type="LOCAL_SEMANTIC",
+            rubric_scores=rubric
         )
 
     @classmethod
@@ -179,19 +195,26 @@ class EvaluationService:
         stage1_semantic_score: float,
         stage1_coverage: float
     ) -> Optional[EvaluationResult]:
-        """Stage 2: Structured Gemini evaluation with explicit rubric."""
+        """Stage 2: Structured Gemini evaluation with explicit 5-dimensional rubric."""
         system_instruction = """You are an expert technical and behavioral interview evaluator.
-Evaluate the candidate's answer objectively according to:
-1. Relevance (Does it answer the prompt?)
-2. Technical correctness & depth
-3. Specificity & Evidence (STAR structure if behavioral)
-4. Communication clarity
+Evaluate the candidate's answer objectively according to 5 dimensions:
+1. relevance (0-10)
+2. technical_accuracy (0-10)
+3. concept_coverage (0-10)
+4. clarity (0-10)
+5. depth (0-10)
 
-Return JSON with:
+Respond ONLY with a JSON object matching this schema:
 {
   "score": <number 0-100>,
-  "rubric_scores": {"relevance": <0-10>, "correctness": <0-10>, "depth": <0-10>, "communication": <0-10>},
-  "feedback": "<concise actionable evaluation>",
+  "rubric_scores": {
+    "relevance": <0-10>,
+    "technical_accuracy": <0-10>,
+    "concept_coverage": <0-10>,
+    "clarity": <0-10>,
+    "depth": <0-10>
+  },
+  "feedback": "<concise actionable feedback>",
   "strengths": "<key strengths demonstrated>",
   "areas_for_improvement": "<specific areas to improve>"
 }"""
@@ -205,7 +228,7 @@ Stage 1 Semantic Similarity: {stage1_semantic_score}
 Stage 1 Concept Coverage: {stage1_coverage}
 """
         json_data = await gemini_client.generate_json(prompt, system_instruction, max_tokens=512)
-        if "score" in json_data:
+        if json_data and "score" in json_data:
             return EvaluationResult(
                 score=float(json_data["score"]),
                 concept_coverage=stage1_coverage,
