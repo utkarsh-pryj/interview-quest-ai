@@ -1,7 +1,8 @@
 import uuid
 from typing import List, Optional, TYPE_CHECKING
-from sqlalchemy import String, Text, ForeignKey, JSON
+from sqlalchemy import String, Text, ForeignKey, JSON, Index
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
 from app.db.base import Base, TimestampMixin
 
 if TYPE_CHECKING:
@@ -10,6 +11,9 @@ if TYPE_CHECKING:
 
 class InterviewQuestion(Base, TimestampMixin):
     __tablename__ = "interview_questions"
+    __table_args__ = (
+        Index('ix_interview_questions_embedding', 'embedding', postgresql_using='hnsw', postgresql_with={'m': 16, 'ef_construction': 64}, postgresql_ops={'embedding': 'vector_cosine_ops'}),
+    )
 
     id: Mapped[str] = mapped_column(
         String(36),
@@ -29,7 +33,7 @@ class InterviewQuestion(Base, TimestampMixin):
     source_dataset: Mapped[str] = mapped_column(String(100), nullable=False)
     source_id: Mapped[Optional[str]] = mapped_column(String(255), index=True, nullable=True)
     quality_status: Mapped[str] = mapped_column(String(50), default="VALID", nullable=False)
-    embedding: Mapped[Optional[List[float]]] = mapped_column(JSON, nullable=True)
+    embedding = mapped_column(Vector(384), nullable=True)
 
     # Relationships
     primary_skill: Mapped[Optional["Skill"]] = relationship("Skill", back_populates="questions")

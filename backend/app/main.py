@@ -24,6 +24,14 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler for startup and shutdown."""
     logger.info("Initializing InterviewQuest AI database tables...")
     try:
+        # Ensure pgvector is created before table sync
+        from sqlalchemy import text
+        try:
+            with sync_engine.begin() as conn:
+                conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector;"))
+        except Exception as e:
+            logger.warning(f"Could not create pgvector extension. Check PostgreSQL installation: {e}")
+            
         # Create all tables on startup (sync engine is rock solid with PgBouncer)
         Base.metadata.create_all(bind=sync_engine)
         logger.info("Database tables initialized successfully in PostgreSQL.")

@@ -43,10 +43,48 @@ class RAGRetriever:
         5. Evaluate explicit confidence via RetrievalConfidenceRouter.
         6. If confidence is LOW or specific gaps are uncovered, trigger targeted Gemini fallback.
         """
-        # Step 1: Query knowledge base
-        stmt = select(InterviewQuestion).options(selectinload(InterviewQuestion.primary_skill))
-        res = await db.execute(stmt)
-        all_db_questions: List[InterviewQuestion] = list(res.scalars().all())
+        # Step 1: Query knowledge base via pgvector cosine distance
+        query_parts = []
+        if role_family: query_parts.append(role_family)
+        for s in matched_skills: query_parts.append(s.get("canonical_name", ""))
+        for s in missing_jd_skills: query_parts.append(f"Missing requirement: {s.get('canonical_name', '')}")
+        synthetic_query = " ".join(query_parts)
+        query_vector = EmbeddingService.embed_text(synthetic_query)
+
+        try:
+            # Try PostgreSQL pgvector native semantic search
+            stmt = (
+                select(InterviewQuestion)
+                .options(selectinload(InterviewQuestion.primary_skill))
+                .filter(InterviewQuestion.embedding.is_not(None))
+                .order_by(InterviewQuestion.embedding.cosine_distance(query_vector))
+                .limit(100)
+            )
+            res = await db.execute(stmt)
+            all_db_questions: List[InterviewQuestion] = list(res.scalars().all())
+            logger.info("Successfully retrieved candidates via pgvector cosine distance.")
+        except Exception as e:
+            # Fallback for local environments where pgvector extension is not installed
+            logger.warning(f"pgvector query failed (is the extension installed?). Falling back to in-memory retrieval: {e}")
+            await db.rollback()
+            stmt = select(InterviewQuestion).options(selectinload(InterviewQuestion.primary_skill)).filter(InterviewQuestion.embedding.is_not(None))
+            res = await db.execute(stmt)
+            all_candidates = list(res.scalars().all())
+            
+            # Compute cosine similarity in Python
+            from app.rag.embeddings import EmbeddingService
+            import numpy as np
+            
+            scored_candidates = []
+            q_vec_np = np.array(query_vector)
+            for cand in all_candidates:
+                if cand.embedding:
+                    c_vec_np = np.array(cand.embedding)
+                    sim = np.dot(q_vec_np, c_vec_np) / (np.linalg.norm(q_vec_np) * np.linalg.norm(c_vec_np) + 1e-9)
+                    scored_candidates.append((sim, cand))
+            
+            scored_candidates.sort(key=lambda x: x[0], reverse=True)
+            all_db_questions = [c for _, c in scored_candidates[:100]]
 
         total_needed = strategy.get("total_questions", 8)
         category_quotas: Dict[str, int] = strategy.get("category_quotas", {"TECHNICAL": 4, "BEHAVIORAL": 2})
